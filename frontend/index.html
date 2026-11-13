@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CTL-Lote</title>
+<style>
+  :root { --cafe: #6b3f24; --borde: #ddd3c9; --fondo: #faf7f4; --ok: #1f7a3a; --err: #b42318; --warn: #b54708; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.4 system-ui, sans-serif; background: var(--fondo); color: #222; }
+  header { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center; padding: 12px 20px; background: var(--cafe); color: #fff; }
+  header h1 { font-size: 18px; margin: 0; }
+  header select { font-size: 14px; padding: 4px; }
+  header small { opacity: .8; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; padding: 20px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  h2 { font-size: 15px; margin: 0 0 10px; }
+  h3 { font-size: 13px; margin: 16px 0 6px; }
+  .tarjeta { background: #fff; border: 1px solid var(--borde); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+  .tarjeta h3 { margin: 0 0 2px; font-family: ui-monospace, monospace; }
+  .tarjeta p { margin: 0 0 8px; color: #666; font-size: 12px; }
+  .campos { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px 10px; }
+  label { display: flex; flex-direction: column; font-size: 11px; color: #555; }
+  input, select { font: inherit; padding: 4px 6px; border: 1px solid var(--borde); border-radius: 4px; }
+  label.check { flex-direction: row; align-items: center; gap: 6px; }
+  button { font: inherit; padding: 5px 12px; border: 0; border-radius: 4px; background: var(--cafe); color: #fff; cursor: pointer; margin-top: 8px; }
+  button:hover { filter: brightness(1.15); }
+  #dte { display: flex; flex-wrap: wrap; gap: 4px; padding: 0; list-style: none; margin: 0 0 12px; }
+  #dte li { padding: 3px 8px; border-radius: 12px; border: 1px solid var(--borde); font-size: 12px; color: #999; background: #fff; }
+  #dte li.pasado { color: var(--cafe); border-color: var(--cafe); }
+  #dte li.actual { background: var(--cafe); color: #fff; font-weight: 600; }
+  #dte li.tarde::after { content: " ⚠"; color: var(--warn); }
+  #dte li.actual.tarde::after { color: #ffd27a; }
+  table { width: 100%; border-collapse: collapse; background: #fff; font-size: 12px; }
+  td, th { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--borde); vertical-align: top; }
+  th { color: #666; font-weight: 500; width: 35%; }
+  #log { font: 12px ui-monospace, monospace; background: #1e1e1e; color: #ddd; border-radius: 8px; padding: 10px; max-height: 320px; overflow: auto; }
+  #log div { padding: 3px 0; border-bottom: 1px solid #333; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .ok { color: #7ee2a0; } .err { color: #ff8b80; } .ev { color: #9cc4ff; }
+  .fila { display: flex; gap: 8px; align-items: end; flex-wrap: wrap; }
+  .fila button { margin: 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>CaféTrace · CTL-Lote</h1>
+  <label style="color:#fff">Firmar como <select id="cuenta"></select></label>
+  <small id="contrato"></small>
+</header>
+<main>
+  <section>
+    <h2>Operaciones</h2>
+    <div id="forms"></div>
+    <div class="tarjeta">
+      <h3>Tiempo (solo red de prueba)</h3>
+      <p>Adelanta el reloj de la blockchain para probar los plazos (cosecha→beneficio 12 h, secado 30 d, frescura 21 d).</p>
+      <div class="fila"><label>Horas <input id="horas" type="number" value="24"></label><button id="avanzar">Avanzar</button></div>
+    </div>
+  </section>
+  <section>
+    <div class="fila" style="margin-bottom:12px">
+      <label>Lote seleccionado <input id="loteId" type="number" min="1" value="1"></label>
+      <button id="ver">Consultar</button>
+    </div>
+    <ol id="dte"></ol>
+    <table id="datos"></table>
+    <h3>Evidencias</h3><table id="evidencias"></table>
+    <h3>Historial de custodia</h3><table id="custodia"></table>
+    <h3>Registro de transacciones</h3><div id="log"></div>
+  </section>
+</main>
+<script src="/ethers.js"></script>
+<script>
+const ESTADOS = ["Registrado", "EnBeneficio", "Secado", "Almacenado", "Trillado", "Calificado", "EnTransporte",
+  "RecibidoPorTostador", "Tostado", "Empaquetado", "Entregado", "Mezclado", "Disputa", "Anulado"];
+const PROCESOS = ["Lavado", "Natural", "Honey", "Otro"];
+const NIVELES = ["Declarado", "VerificadoTercero", "Sensorizado", "Auditado"];
+
+// Orden, descripción y quién firma, según el TP.
+const OPERACIONES = [
+  ["crearLote", "Crea el lote con su origen. Firma: Productor."],
+  ["registrarEtapa", "Transiciones simples del DTE. Firma: Beneficio (EnBeneficio, Secado, Almacenado) o Tostador (Tostado, Empaquetado). valor = kg recibidos para EnBeneficio, humedad en décimas para Almacenado (115 = 11,5 %)."],
+  ["registrarPesoVerde", "Almacenado → Trillado. Firma: Beneficio custodio."],
+  ["firmarCalificacion", "Trillado → Calificado. Puntaje en centésimas (8650 = 86,50). Firma: Q Grader."],
+  ["cambiarCustodia", "Doble firma, paso 1: el custodio actual propone la entrega (Calificado→Transportista, EnTransporte→Tostador, Empaquetado→Cafetería)."],
+  ["aceptarCustodia", "Doble firma, paso 2: el receptor confirma peso y sacos y el lote avanza."],
+  ["crearLoteMezcla", "Mezcla lotes Almacenados o Trillados (ids separados por coma). Firma: Beneficio custodio."],
+  ["registrarEvidencia", "Agrega evidencia. El nivel lo define el rol: Gateway = Sensorizado, Auditor = Auditado, resto = Declarado."],
+  ["abrirDisputa", "Congela el lote. Firma: participante del lote, Comité o Auditor."],
+  ["resolverDisputa", "Vuelve al estado previo (a favor) o anula. Firma: Comité o Auditor."],
+];
+
+// Valores de ejemplo para la demo (todos editables).
+const EJEMPLOS = {
+  finca: "Finca La Esperanza", region: "Huila, Colombia", variedad: "Geisha", altitud: 1800,
+  fechaCosecha: 1, pesoEstimadoKg: 1200, cantidadSacos: 20, valor: 1500, hashEvidencia: "boleta de pesaje",
+  pesoVerdeKg: 1200, puntajeSCA: 8650, hashFicha: "ficha de cata", pesoKg: 1200, sacos: 20,
+  origenes: "1,2", hash: "lecturas de humedad", uri: "ipfs://ejemplo", motivo: "peso dudoso",
+  aFavor: true, hashInforme: "informe de resolución",
+};
+const ETIQUETAS = { fechaCosecha: "fechaCosecha (horas atrás)" };
+
+const $ = (id) => document.getElementById(id);
+const textos = {}; // hash -> texto original, para mostrar las evidencias legibles
+let cfg, provider, ctl;
+
+const nombre = (a) => cfg.cuentas.find((c) => c.address.toLowerCase() === a.toLowerCase())?.nombre
+  ?? (a === ethers.ZeroAddress ? "—" : a.slice(0, 10) + "…");
+const fecha = (ts) => (ts > 0n ? new Date(Number(ts) * 1000).toLocaleString("es-AR") : "—");
+const hashLegible = (h) => textos[h] ? `"${textos[h]}"` : h.slice(0, 14) + "…";
+
+function log(html, clase = "") {
+  const div = document.createElement("div");
+  div.className = clase;
+  div.innerHTML = `[${new Date().toLocaleTimeString()}] ${html}`;
+  $("log").prepend(div);
+}
+
+function motivoError(e) {
+  const msg = e.info?.error?.message ?? e.error?.message ?? e.message ?? String(e);
+  return e.reason ?? msg.match(/reason string '(.+?)'/)?.[1] ?? e.shortMessage ?? msg;
+}
+
+function crearCampo(op, p) {
+  const label = document.createElement("label");
+  let el;
+  if (p.name === "hacia" || p.name === "tipoProceso") {
+    el = document.createElement("select");
+    const opciones = p.name === "hacia" ? ESTADOS : PROCESOS;
+    el.innerHTML = opciones.map((o, i) => `<option value="${i}">${o}</option>`).join("");
+    if (p.name === "hacia") el.value = "1";
+  } else if (p.type === "address") {
+    el = document.createElement("select");
+    el.innerHTML = cfg.cuentas.map((c) => `<option value="${c.address}">${c.nombre}</option>`).join("");
+  } else if (p.type === "bool") {
+    el = document.createElement("input");
+    el.type = "checkbox";
+    el.checked = EJEMPLOS[p.name] ?? false;
+    label.className = "check";
+  } else {
+    el = document.createElement("input");
+    el.value = EJEMPLOS[p.name] ?? "";
+  }
+  el.name = p.name;
+  label.append(ETIQUETAS[p.name] ?? `${p.name} (${p.type})`, el);
+  return label;
+}
+
+async function convertir(p, el) {
+  if (p.name === "loteId") return $("loteId").value;
+  if (p.type === "bool") return el.checked;
+  const v = el.value.trim();
+  if (p.type === "bytes32") {
+    if (/^0x[0-9a-fA-F]{64}$/.test(v)) return v;
+    if (!v) return ethers.ZeroHash;
+    const h = ethers.id(v);
+    textos[h] = v;
+    return h;
+  }
+  if (p.type.endsWith("[]")) return v.split(",").map((s) => s.trim()).filter(Boolean);
+  if (p.name === "fechaCosecha") {
+    const bloque = await provider.getBlock("latest");
+    return bloque.timestamp - Math.round(Number(v) * 3600);
+  }
+  return v;
+}
+
+function formatearEvento(ev) {
+  const args = ev.fragment.inputs.map((inp, i) => {
+    const v = ev.args[i];
+    if (inp.type === "address") return `${inp.name}=${nombre(v)}`;
+    if (["desde", "hacia", "etapa"].includes(inp.name)) return `${inp.name}=${ESTADOS[v]}`;
+    if (inp.name === "nivel") return `nivel=${NIVELES[v]}`;
+    if (inp.type === "bytes32") return `${inp.name}=${hashLegible(v)}`;
+    return `${inp.name}=${v}`;
+  });
+  return `${ev.name}(${args.join(", ")})`;
+}
+
+async function ejecutar(nombreFn, form) {
+  const f = ctl.interface.getFunction(nombreFn);
+  const args = [];
+  for (const p of f.inputs) args.push(await convertir(p, form.elements[p.name]));
+  const quien = nombre($("cuenta").value);
+  try {
+    const signer = await provider.getSigner($("cuenta").value);
+    const tx = await ctl.connect(signer)[nombreFn](...args);
+    const recibo = await tx.wait();
+    const eventos = recibo.logs.map((l) => ctl.interface.parseLog(l)).filter(Boolean);
+    log(`✔ <b>${quien}</b> → ${nombreFn}` + eventos.map((e) => `\n   <span class="ev">${formatearEvento(e)}</span>`).join(""), "ok");
+    if (nombreFn === "crearLote" || nombreFn === "crearLoteMezcla") $("loteId").value = await ctl.cantidadLotes();
+  } catch (e) {
+    log(`✘ <b>${quien}</b> → ${nombreFn}: rechazada · <b>${motivoError(e)}</b>`, "err");
+  }
+  await consultar();
+}
+
+async function consultar() {
+  const id = BigInt($("loteId").value || 0);
+  const total = await ctl.cantidadLotes();
+  if (id < 1n || id > total) {
+    $("dte").innerHTML = "";
+    $("datos").innerHTML = `<tr><td>No existe el lote ${id}. Hay ${total} lote(s) creados.</td></tr>`;
+    $("evidencias").innerHTML = $("custodia").innerHTML = "";
+    return;
+  }
+  const [l, marcas, tardes, evidencias, custodia, pendiente] = await Promise.all([
+    ctl.consultarLote(id),
+    Promise.all(ESTADOS.map((_, i) => ctl.marcaTiempo(id, i))),
+    Promise.all(ESTADOS.map((_, i) => ctl.incumplimiento(id, i))),
+    ctl.consultarEvidencias(id),
+    ctl.consultarHistorialCustodia(id),
+    ctl.traspasoPendiente(id),
+  ]);
+
+  $("dte").innerHTML = ESTADOS.map((e, i) => {
+    const clases = [i === Number(l.estado) ? "actual" : marcas[i] > 0n ? "pasado" : "", tardes[i] ? "tarde" : ""].join(" ");
+    return `<li class="${clases}" title="${fecha(marcas[i])}">${e}</li>`;
+  }).join("");
+
+  const filas = [
+    ["Estado", ESTADOS[l.estado] + (Number(l.estado) === 12 ? ` (antes: ${ESTADOS[l.estadoAnterior]}) · motivo ${hashLegible(l.motivoDisputa)}` : "")],
+    ["Productor", nombre(l.productor)],
+    ["Custodio actual", nombre(l.custodioActual)],
+    ["Origen", `${l.finca} · ${l.region} · ${l.variedad} · ${l.altitud} m`],
+    ["Proceso", PROCESOS[l.tipoProceso]],
+    ["Cosecha", fecha(l.fechaCosecha)],
+    ["Peso estimado / recepción / verde", `${l.pesoEstimadoKg} / ${l.pesoRecepcionKg} / ${l.pesoVerdeKg} kg`],
+    ["Sacos", l.cantidadSacos],
+    ["Humedad final", l.humedadFinal > 0n ? `${Number(l.humedadFinal) / 10} %` : "—"],
+    ["Puntaje SCA", l.puntajeSCA > 0n ? `${Number(l.puntajeSCA) / 100} (por ${nombre(l.qGrader)})` : "—"],
+    ["Plazos incumplidos", ESTADOS.filter((_, i) => tardes[i]).join(", ") || "ninguno"],
+  ];
+  if (l.lotesOrigen.length) filas.push(["Lotes de origen", l.lotesOrigen.join(", ")]);
+  if (pendiente.recibe !== ethers.ZeroAddress)
+    filas.push(["Traspaso pendiente", `${nombre(pendiente.entrega)} → ${nombre(pendiente.recibe)} · ${pendiente.pesoKg} kg · ${pendiente.sacos} sacos`]);
+  $("datos").innerHTML = filas.map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join("");
+
+  $("evidencias").innerHTML = evidencias.length
+    ? "<tr><th>Evidencia</th><th>Nivel</th><th>Firmante</th><th>Fecha</th></tr>" +
+      evidencias.map((e) => `<tr><td>${hashLegible(e.hash)}${e.uri ? " · " + e.uri : ""}</td><td>${NIVELES[e.nivel]}</td><td>${nombre(e.firmante)}</td><td>${fecha(e.fecha)}</td></tr>`).join("")
+    : "<tr><td>Sin evidencias</td></tr>";
+
+  $("custodia").innerHTML = custodia.length
+    ? "<tr><th>Entrega → Recibe</th><th>Peso</th><th>Sacos</th><th>Fecha</th></tr>" +
+      custodia.map((t) => `<tr><td>${nombre(t.entrega)} → ${nombre(t.recibe)}</td><td>${t.pesoKg} kg</td><td>${t.sacos}</td><td>${fecha(t.fecha)}</td></tr>`).join("")
+    : "<tr><td>Sin traspasos</td></tr>";
+}
+
+async function iniciar() {
+  cfg = await (await fetch("/config.json")).json();
+  provider = new ethers.JsonRpcProvider(location.origin + "/rpc", undefined, { batchMaxCount: 1, pollingInterval: 200 });
+  ctl = new ethers.Contract(cfg.address, cfg.abi, provider);
+  $("contrato").textContent = `Contrato ${cfg.address}`;
+  $("cuenta").innerHTML = cfg.cuentas.map((c) => `<option value="${c.address}">${c.nombre} — ${c.address.slice(0, 8)}…</option>`).join("");
+  $("cuenta").value = cfg.cuentas.find((c) => c.nombre === "Productor").address;
+
+  for (const [fn, desc] of OPERACIONES) {
+    const form = document.createElement("form");
+    form.className = "tarjeta";
+    form.innerHTML = `<h3>${fn}</h3><p>${desc}</p>`;
+    const campos = document.createElement("div");
+    campos.className = "campos";
+    for (const p of ctl.interface.getFunction(fn).inputs) if (p.name !== "loteId") campos.append(crearCampo(fn, p));
+    form.append(campos);
+    form.insertAdjacentHTML("beforeend", "<button>Ejecutar</button>");
+    form.onsubmit = (ev) => { ev.preventDefault(); ejecutar(fn, form); };
+    $("forms").append(form);
+  }
+
+  $("ver").onclick = consultar;
+  $("loteId").onchange = consultar;
+  $("avanzar").onclick = async () => {
+    const segundos = Math.round(Number($("horas").value) * 3600);
+    await provider.send("evm_increaseTime", [segundos]);
+    await provider.send("evm_mine", []);
+    log(`⏱ Reloj adelantado ${$("horas").value} h`);
+  };
+  await consultar();
+}
+
+iniciar().catch((e) => log(`Error al iniciar: ${e.message}`, "err"));
+</script>
+</body>
+</html>
