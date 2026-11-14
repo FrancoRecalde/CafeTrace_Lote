@@ -38,6 +38,20 @@
   #log div { padding: 3px 0; border-bottom: 1px solid #333; white-space: pre-wrap; overflow-wrap: anywhere; }
   .ok { color: #7ee2a0; } .err { color: #ff8b80; } .ev { color: #9cc4ff; }
   .fila { display: flex; gap: 8px; align-items: end; flex-wrap: wrap; }
+  .der { position: sticky; top: 0; align-self: start; max-height: 100vh; overflow: auto; }
+  @media (max-width: 900px) { .der { position: static; max-height: none; } }
+  .consola { background: #1e1e1e; color: #ddd; border-radius: 8px; padding: 10px 12px; font: 12px ui-monospace, monospace; margin-bottom: 16px; }
+  .consola h2 { color: #fff; font: 600 13px system-ui, sans-serif; margin: 0 0 8px; }
+  .consola h4 { color: #aaa; font: 500 12px system-ui, sans-serif; margin: 12px 0 4px; }
+  .consola .kv { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 3px 10px; }
+  .consola .kv > * { overflow-wrap: anywhere; }
+  .consola .kv > :nth-child(odd) { color: #999; }
+  .consola .nota { color: #888; }
+  .consola details { border-bottom: 1px solid #333; padding: 2px 0; }
+  .consola summary { cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .consola summary .exp { color: #888; }
+  .consola pre { margin: 4px 0 6px 14px; white-space: pre-wrap; overflow-wrap: anywhere; color: #bbb; max-height: 240px; overflow: auto; }
+  #rpc { max-height: 260px; overflow: auto; }
   .fila button { margin: 0; }
 </style>
 </head>
@@ -57,7 +71,13 @@
       <div class="fila"><label>Horas <input id="horas" type="number" value="24"></label><button id="avanzar">Avanzar</button></div>
     </div>
   </section>
-  <section>
+  <section class="der">
+    <div class="consola">
+      <h2>Última ejecución</h2>
+      <div id="resumen"><span class="nota">Ejecutá una operación para ver qué se envió a la blockchain y qué devolvió.</span></div>
+      <h4>Tráfico JSON-RPC con la blockchain (clic para ver el JSON)</h4>
+      <div id="rpc"></div>
+    </div>
     <div class="fila" style="margin-bottom:12px">
       <label>Lote seleccionado <input id="loteId" type="number" min="1" value="1"></label>
       <button id="ver">Consultar</button>
@@ -177,21 +197,92 @@ function formatearEvento(ev) {
   return `${ev.name}(${args.join(", ")})`;
 }
 
+// ---- Consola de la última ejecución -------------------------------------------
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const EXPLICA = {
+  eth_chainId: "pregunta en qué red está",
+  eth_accounts: "lista las cuentas del nodo",
+  eth_estimateGas: "simula la transacción; si revierte, no se envía",
+  eth_sendTransaction: "envía la transacción firmada por la cuenta elegida",
+  eth_getTransactionByHash: "busca la transacción enviada",
+  eth_getTransactionReceipt: "pide el recibo: bloque, gas usado y eventos",
+  eth_blockNumber: "pregunta el último bloque",
+};
+let trafico = []; // [dirección, payload] de cada mensaje JSON-RPC
+
+function formatearArg(p, v) {
+  if (p.name === "hacia") return `${ESTADOS[v]} (${v})`;
+  if (p.name === "tipoProceso") return `${PROCESOS[v]} (${v})`;
+  if (p.type === "address") return `${nombre(v)} (${v})`;
+  if (p.name === "fechaCosecha") return `${v} (${fecha(BigInt(v))})`;
+  if (p.type === "bytes32") return textos[v] ? `"${textos[v]}" → ${v}` : v;
+  if (Array.isArray(v)) return `[${v.join(", ")}]`;
+  return String(v);
+}
+
+function renderRpc(lista) {
+  const metodo = {};
+  return lista.flatMap(([dir, x]) => (Array.isArray(x) ? x : [x]).map((it) => {
+    let titulo, clase = "";
+    if (dir === "→") {
+      metodo[it.id] = it.method;
+      titulo = `→ ${esc(it.method)} <span class="exp">— ${EXPLICA[it.method] ?? ""}</span>`;
+    } else if (dir === "✘" || it.error) {
+      clase = "err";
+      titulo = `← ${esc(metodo[it.id] ?? "error")}: ERROR ${esc((it.error ?? it).message?.split("\n")[0] ?? "")}`;
+    } else {
+      const r = JSON.stringify(it.result);
+      clase = "ok";
+      titulo = `← ${esc(metodo[it.id] ?? "")} = ${esc(r.length > 70 ? r.slice(0, 70) + "…" : r)}`;
+    }
+    return `<details><summary class="${clase}">${titulo}</summary><pre>${esc(JSON.stringify(it, null, 2))}</pre></details>`;
+  })).join("");
+}
+
+function mostrarEjecucion(ej) {
+  const filas = [
+    ["Operación", `<b>${ej.fn}</b>(${ej.f.inputs.map((p, i) => `${p.name}=${esc(formatearArg(p, ej.args[i]))}`).join(", ")})`],
+    ["Firmante", `${nombre(ej.desde)} (${ej.desde})`],
+    ["Contrato", cfg.address],
+    ["Calldata", `<div class="nota" style="max-height:4.5em;overflow:auto">${ctl.interface.encodeFunctionData(ej.fn, ej.args)}</div>`],
+  ];
+  if (ej.error) {
+    filas.push(["Resultado", `<span class="err">✘ REVERTIDA — no se escribió nada en la blockchain</span>`]);
+    filas.push(["Motivo", `<span class="err">${esc(motivoError(ej.error))}</span>`]);
+  } else {
+    filas.push(["Resultado", `<span class="ok">✔ CONFIRMADA — estado escrito en la blockchain</span>`]);
+    filas.push(["Tx hash", ej.recibo.hash]);
+    filas.push(["Bloque", `#${ej.recibo.blockNumber}`]);
+    filas.push(["Gas usado", ej.recibo.gasUsed.toString()]);
+    filas.push(["Eventos", ej.eventos.map((e) => `<div class="ev">${esc(formatearEvento(e))}</div>`).join("") || "—"]);
+  }
+  $("resumen").innerHTML = `<div class="kv">${filas.map(([k, v]) => `<div>${k}</div><div>${v}</div>`).join("")}</div>`;
+  $("rpc").innerHTML = renderRpc(ej.rpc);
+}
+
 async function ejecutar(nombreFn, form) {
   const f = ctl.interface.getFunction(nombreFn);
   const args = [];
   for (const p of f.inputs) args.push(await convertir(p, form.elements[p.name]));
-  const quien = nombre($("cuenta").value);
+  const desde = $("cuenta").value;
+  const quien = nombre(desde);
+  const ej = { fn: nombreFn, f, args, desde };
+  trafico = [];
   try {
-    const signer = await provider.getSigner($("cuenta").value);
+    const signer = await provider.getSigner(desde);
     const tx = await ctl.connect(signer)[nombreFn](...args);
-    const recibo = await tx.wait();
-    const eventos = recibo.logs.map((l) => ctl.interface.parseLog(l)).filter(Boolean);
-    log(`✔ <b>${quien}</b> → ${nombreFn}` + eventos.map((e) => `\n   <span class="ev">${formatearEvento(e)}</span>`).join(""), "ok");
+    ej.recibo = await tx.wait();
+    ej.eventos = ej.recibo.logs.map((l) => ctl.interface.parseLog(l)).filter(Boolean);
+    log(`✔ <b>${quien}</b> → ${nombreFn}` + ej.eventos.map((e) => `\n   <span class="ev">${esc(formatearEvento(e))}</span>`).join(""), "ok");
     if (nombreFn === "crearLote" || nombreFn === "crearLoteMezcla") $("loteId").value = await ctl.cantidadLotes();
   } catch (e) {
-    log(`✘ <b>${quien}</b> → ${nombreFn}: rechazada · <b>${motivoError(e)}</b>`, "err");
+    ej.error = e;
+    log(`✘ <b>${quien}</b> → ${nombreFn}: rechazada · <b>${esc(motivoError(e))}</b>`, "err");
   }
+  await new Promise((r) => setTimeout(r, 50)); // deja llegar los últimos mensajes RPC
+  ej.rpc = trafico;
+  trafico = null; // las consultas de refresco no se registran
+  mostrarEjecucion(ej);
   await consultar();
 }
 
@@ -251,6 +342,13 @@ async function iniciar() {
   cfg = await (await fetch("/config.json")).json();
   provider = new ethers.JsonRpcProvider(location.origin + "/rpc", undefined, { batchMaxCount: 1, pollingInterval: 200 });
   ctl = new ethers.Contract(cfg.address, cfg.abi, provider);
+  provider.on("debug", (d) => {
+    if (!trafico) return;
+    if (d.action === "sendRpcPayload") trafico.push(["→", d.payload]);
+    else if (d.action === "receiveRpcResult") trafico.push(["←", d.result]);
+    else if (d.action === "receiveRpcError") trafico.push(["✘", d.error]);
+  });
+  trafico = null;
   $("contrato").textContent = `Contrato ${cfg.address}`;
   $("cuenta").innerHTML = cfg.cuentas.map((c) => `<option value="${c.address}">${c.nombre} — ${c.address.slice(0, 8)}…</option>`).join("");
   $("cuenta").value = cfg.cuentas.find((c) => c.nombre === "Productor").address;
